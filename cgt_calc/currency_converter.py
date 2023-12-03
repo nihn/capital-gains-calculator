@@ -29,6 +29,7 @@ class CurrencyConverter:
         self.exchange_rates_file = exchange_rates_file
         read_data = self._read_exchange_rates_file(exchange_rates_file)
         self.cache = {**read_data, **(initial_data or {})}
+        self.session = requests.Session()
 
     @staticmethod
     def _read_exchange_rates_file(
@@ -71,16 +72,28 @@ class CurrencyConverter:
             writer = csv.writer(fout)
             writer.writerows([EXCHANGE_RATES_HEADER] + data_rows)
 
-    def _query_hmrc_api(self, month_str: str) -> None:
-        url = (
-            "http://www.hmrc.gov.uk/softwaredevelopers/rates/"
-            f"exrates-monthly-{month_str}.xml"
-        )
-        response = requests.get(url, timeout=10)
+    def _query_hmrc_api(self, date: datetime.date) -> None:
+        # Pre 2021 we need to use the old HMRC endpoint
+        if date.year < 2021:
+            month_str = date.strftime("%m%y")
+            url = (
+                "http://www.hmrc.gov.uk/softwaredevelopers/rates/"
+                f"exrates-monthly-{month_str}.xml"
+            )
+        else:
+            month_str = date.strftime("%Y-%m")
+            url = (
+                "https://www.trade-tariff.service.gov.uk/api/v2/"
+                f"exchange_rates/files/monthly_xml_{month_str}.xml"
+            )
+
+        response = self.session.get(url, timeout=10)
+
         if not response.ok:
             raise ParsingError(
                 url, f"HMRC API returned a {response.status_code} response"
             )
+
         tree = ElementTree.fromstring(response.text)
         rates = {
             str(getattr(row.find("currencyCode"), "text", None)).upper(): Decimal(
@@ -90,18 +103,17 @@ class CurrencyConverter:
         }
         if None in rates or None in rates.values():
             raise ParsingError(url, "HMRC API produced invalid/unknown data")
-        self.cache[month_str] = rates
+        self.cache[date] = rates
         self._write_exchange_rates_file(self.exchange_rates_file, self.cache)
 
     def currency_to_gbp_rate(self, currency: str, date: datetime.date) -> Decimal:
         """Get GBP/currency rate at given date."""
         assert is_date(date)
-        month_str = date.strftime("%m%y")
-        if month_str not in self.cache:
-            self._query_hmrc_api(month_str)
-        if currency not in self.cache[month_str]:
+        if date not in self.cache:
+            self._query_hmrc_api(date)
+        if currency not in self.cache[date]:
             raise ExchangeRateMissingError(currency, date)
-        return self.cache[month_str][currency]
+        return self.cache[date][currency]
 
     def to_gbp(self, amount: Decimal, currency: str, date: datetime.date) -> Decimal:
         """Convert amount from given currency to GBP."""
